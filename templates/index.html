@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Road Accident Detection</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+ body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0}
+ header{padding:16px 24px;background:#1e293b;font-size:20px;font-weight:600}
+ main{padding:20px;display:grid;gap:20px;grid-template-columns:2fr 1fr}
+ .card{background:#1e293b;border-radius:10px;padding:16px}
+ h3{margin:0 0 12px;font-size:16px;color:#93c5fd}
+ .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+ .stat{background:#0f172a;border-radius:8px;padding:10px;text-align:center}
+ .stat b{display:block;font-size:22px;color:#f8fafc}
+ img#view{width:100%;background:#000;border-radius:8px;min-height:240px}
+ button,select,input[type=file]{margin:4px 4px 4px 0;padding:8px 12px;border-radius:6px;border:0;background:#334155;color:#fff}
+ button{cursor:pointer;background:#2563eb} button.red{background:#dc2626}
+ table{width:100%;border-collapse:collapse;font-size:13px} th,td{padding:6px;border-bottom:1px solid #334155;text-align:left}
+ #alert{display:none;background:#dc2626;padding:10px;border-radius:8px;margin-bottom:10px;font-weight:600}
+ .wide{grid-column:1/-1} small{color:#94a3b8}
+ @media(max-width:900px){main{grid-template-columns:1fr}}
+</style></head><body>
+<header>Real-Time Road Accident Detection System</header>
+<main>
+ <div class="card">
+  <div id="alert">POSSIBLE ACCIDENT DETECTED - please review the evidence</div>
+  <h3>Video analysis</h3>
+  <input type="file" id="file" accept="video/*">
+  <button onclick="uploadVideo()">Upload &amp; analyse</button>
+  <button onclick="startLive()">Live camera</button><br>
+  <label>Detector:
+   <select id="detector"><option value="yolo">YOLOv8 (real traffic video)</option>
+   <option value="blob">Colour blobs (demo videos only)</option></select></label>
+  <button onclick="useSample('safe')">Demo: safe traffic</button>
+  <button class="red" onclick="useSample('accident')">Demo: accident</button>
+  <img id="view" alt="Video output appears here">
+  <small id="msg">Demo videos are drawn rectangles: choose the "Colour blobs" detector for them.</small>
+ </div>
+ <div class="card">
+  <h3>Telemetry</h3>
+  <div class="stats">
+   <div class="stat"><b id="s_total">0</b>Total incidents</div>
+   <div class="stat"><b id="s_today">0</b>Today</div>
+   <div class="stat"><b id="s_veh">0</b>Vehicles now</div>
+   <div class="stat"><b id="s_prob">0.00</b>P(accident)</div>
+   <div class="stat"><b id="s_avg">0.00</b>Avg confidence</div>
+   <div class="stat"><b id="s_state">idle</b>Status</div>
+  </div>
+  <canvas id="chart" height="160" style="margin-top:14px"></canvas>
+ </div>
+ <div class="card wide">
+  <h3>Incident history</h3>
+  <table><thead><tr><th>ID</th><th>Time</th><th>Confidence</th><th>Source</th><th>Evidence</th><th></th></tr></thead>
+  <tbody id="rows"></tbody></table>
+  <small>Alerts are model estimates and must be verified by a human operator.</small>
+ </div>
+</main>
+<script>
+let lastTotal=null, chart, ctx;
+const $=id=>document.getElementById(id);
+function show(url){ $('view').src=url+(url.includes('?')?'&':'?')+'t='+Date.now(); }
+function det(){ return $('detector').value; }
+async function uploadVideo(){
+  const f=$('file').files[0]; if(!f){$('msg').textContent='Choose a video first.';return;}
+  const fd=new FormData(); fd.append('video',f);
+  const r=await fetch('/upload',{method:'POST',body:fd}); const j=await r.json();
+  if(j.error){$('msg').textContent=j.error;return;}
+  show('/stream/'+encodeURIComponent(j.filename)+'?detector='+det());
+}
+async function useSample(k){
+  $('detector').value='blob';
+  const r=await fetch('/sample/'+k,{method:'POST'}); const j=await r.json();
+  show('/stream/'+j.filename+'?detector=blob');
+}
+function startLive(){ show('/live?detector='+det()); }
+function beep(){
+  try{const a=new (window.AudioContext||window.webkitAudioContext)();const o=a.createOscillator();
+  o.frequency.value=880;o.connect(a.destination);o.start();setTimeout(()=>{o.stop();a.close()},500);}catch(e){}
+}
+async function del(id){ await fetch('/api/incidents/'+id,{method:'DELETE'}); refresh(); }
+async function refresh(){
+  const s=await (await fetch('/api/stats')).json();
+  $('s_total').textContent=s.total_incidents; $('s_today').textContent=s.today_incidents;
+  $('s_veh').textContent=s.vehicles; $('s_prob').textContent=Number(s.probability).toFixed(2);
+  $('s_avg').textContent=Number(s.avg_confidence).toFixed(2);
+  $('s_state').textContent=s.status+(s.classifier===false?' (no model)':'');
+  if(lastTotal!==null && s.total_incidents>lastTotal){
+    beep(); $('alert').style.display='block'; setTimeout(()=>$('alert').style.display='none',4000);
+  }
+  lastTotal=s.total_incidents;
+  const inc=await (await fetch('/api/incidents')).json();
+  $('rows').innerHTML=inc.map(i=>`<tr><td>${i.id}</td><td>${i.timestamp}</td><td>${i.confidence.toFixed(2)}</td>
+   <td>${i.source||''}</td><td>${i.evidence_path?`<a style="color:#93c5fd" target="_blank" href="/static/${i.evidence_path}">view</a>`:''}</td>
+   <td><button class="red" onclick="del(${i.id})">Delete</button></td></tr>`).join('');
+  const d=inc.slice().reverse();
+  if(chart) chart.destroy();
+  chart=new Chart($('chart'),{type:'bar',data:{labels:d.map(i=>'#'+i.id),datasets:[{label:'Confidence',data:d.map(i=>i.confidence),backgroundColor:'#3b82f6'}]},
+   options:{scales:{y:{min:0,max:1}},plugins:{legend:{labels:{color:'#e2e8f0'}}}}});
+}
+setInterval(refresh,2000); refresh();
+</script></body></html>
